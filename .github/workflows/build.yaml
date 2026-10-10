@@ -30,8 +30,10 @@ jobs:
           install-only: true
           version: latest
 
-      - name: Create tag locally
-        run: git tag ${{ github.event.inputs.tag }}
+      - name: Create and push tag
+        run: |
+          git tag ${{ github.event.inputs.tag }}
+          git push origin ${{ github.event.inputs.tag }}
 
       # GoReleaser will take care of publishing those artifacts into the release
       - name: Run GoReleaser
