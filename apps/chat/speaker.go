@@ -52,7 +52,7 @@ func (s *Speaker) PlayTTS(text string, blocking bool) error {
 func (s *Speaker) PlayTTSWithTimeout(text string, timeoutMs uint64) error {
 	encoded := url.QueryEscape(text)
 	ttsURL := fmt.Sprintf("http://10.0.0.222:5000/tts?text=%s", encoded)
-	script := fmt.Sprintf("curl -s -m 20 -o /tmp/tts.mp3 '%s' && miplayer -f /tmp/tts.mp3 && rm -f /tmp/tts.mp3", ttsURL)
+	script := fmt.Sprintf("curl -s -m 20 -o /tmp/tts.mp3 '%s' && miplayer -f /tmp/tts.mp3", ttsURL)
 	_, err := s.runShell(script, timeoutMs)
 	return err
 }
