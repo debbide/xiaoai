@@ -8,8 +8,21 @@
  * 2. 程序化提交短信/邮箱验证码（verifyPhone / verifyEmail），不用去浏览器
  * 3. micoapi 的 sts 接口验证后可能瞬时 401，自动重试一次
  *
+ * 对齐 hass-xiaomi-miot master（PR #2948 / #2950）的修复：
+ * 4. serviceLogin 在“已带有效会话”时（刚通过短信/邮箱验证、或本地有 passToken）
+ *    会直接返回 code=0 + location，且**不再返回 _sign**。此时必须跳过
+ *    serviceLoginAuth2，直接从该响应取 ssecurity/nonce/passToken；
+ *    否则 ssecurity 缺失 → 后续 api.io.mi.com 请求全部 “invalid signature”。
+ *    （上游原话：verify 分支若提前 return，会跳过唯一取 ssecurity 的 step1）
+ * 5. 消费 verify 返回的 location 时要跟随 3xx 跳转（HA allow_redirects=True），
+ *    才能拿到验证结果页下发的 passToken 等 cookie。
+ * 6. 解析 &&&START&&& JSON 时保留大整数精度（nonce/userId 是 19 位整数），
+ *    否则 micoapi 的 clientSign 会算错（对齐 mi-service-lite parseAuthPass）。
+ *
  * 流程：
- *   step1: GET /pass/serviceLogin?sid=xxx 拿 _sign/qs/callback
+ *   step1: GET /pass/serviceLogin?sid=xxx
+ *          → 未登录：拿 _sign/qs/callback 继续 step2
+ *          → 已登录：直接拿 location + ssecurity，跳过 step2
  *   step2: POST /pass/serviceLoginAuth2 提交账号密码
  *          → 成功返回 location；风控返回 notificationUrl
  *   step3: GET {notificationUrl → identity/list} 拿 identity_session + 验证方式
@@ -124,8 +137,15 @@ function sha1b64(s: string): string {
 }
 
 function parseAuthJson(text: string): any {
-  // 小米返回 &&&START&&&{...} 格式
-  const t = text.replace("&&&START&&&", "").trim();
+  // 小米返回 &&&START&&&{...} 格式。
+  // 注意：nonce / userId 等字段是 19 位大整数，JSON.parse 会丢精度，
+  // 导致 micoapi 的 clientSign 算错、cookie 里的 userId 被四舍五入 →
+  // 后续请求 “invalid signature”。先把 9 位以上的数字转成字符串再解析
+  // （与 mi-service-lite 的 parseAuthPass 一致）。
+  const t = text
+    .replace("&&&START&&&", "")
+    .replace(/:(\d{9,})/g, ':"$1"')
+    .trim();
   try {
     return JSON.parse(t);
   } catch {
@@ -138,6 +158,15 @@ function randomDeviceId(): string {
     "android_" +
     crypto.randomBytes(8).toString("hex")
   );
+}
+
+/** micoapi 需要在 location 上追加 clientSign（sha1(`nonce=..&ssecurity`) 的 base64） */
+function withClientSign(location: string, sid: string, auth: any): string {
+  if (sid !== "xiaomiio" && auth?.nonce && auth?.ssecurity) {
+    const sign = sha1b64(`nonce=${auth.nonce}&${auth.ssecurity}`);
+    return location + "&clientSign=" + encodeURIComponent(sign);
+  }
+  return location;
 }
 
 async function httpGet(
@@ -209,6 +238,7 @@ export interface AuthStep12Result {
   ssecurity?: string;
   passToken?: string;
   userId?: string;
+  cUserId?: string;
   notificationUrl?: string;
   captchaUrl?: string;
   step1?: any;
@@ -263,19 +293,14 @@ async function step2(
   });
   const auth = r.json;
   if (auth.location) {
-    let location: string = auth.location;
-    // micoapi 需要 clientSign（hass-xiaomi-miot _login_step2）
-    if (creds.sid !== "xiaomiio" && auth.nonce && auth.ssecurity) {
-      const sign = sha1b64(`nonce=${auth.nonce}&${auth.ssecurity}`);
-      location += "&clientSign=" + encodeURIComponent(sign);
-    }
     return {
       ok: true,
-      location,
+      location: withClientSign(auth.location, creds.sid, auth),
       nonce: auth.nonce,
       ssecurity: auth.ssecurity,
       passToken: auth.passToken,
       userId: String(auth.userId || ""),
+      cUserId: auth.cUserId ? String(auth.cUserId) : undefined,
       step1: s1,
     };
   }
@@ -290,6 +315,48 @@ async function step2(
     return { ok: false, error: "账号或密码错误（code=" + code + "）" };
   }
   return { ok: false, error: "登录失败 code=" + code + " " + (auth.desc || auth.message || "") };
+}
+
+/**
+ * step1 + step2 合并入口，返回统一的登录中间结果。
+ *
+ * 关键（对齐 hass-xiaomi-miot master，PR #2948）：
+ * serviceLogin 在“已带有效会话”时——比如刚通过短信/邮箱验证、或本地已有
+ * passToken——会直接返回 code=0 + location，并且**不再返回 _sign**。
+ * 这时必须跳过 serviceLoginAuth2，直接从该响应里取 ssecurity/nonce/passToken。
+ * 若仍按老逻辑要求 _sign 并强制走 step2，验证码流程会在最后一步直接报
+ * “验证后 serviceLogin 未返回签名参数”，或即使走通也拿不到 ssecurity，
+ * 导致后续所有 api.io.mi.com 请求 “invalid signature”。
+ */
+async function loginStep12(
+  creds: XiaomiCreds,
+  deviceId: string,
+  jar: CookieJar
+): Promise<AuthStep12Result> {
+  const s1 = await step1(creds, deviceId, jar);
+  // 已认证：serviceLogin 直接给出 location，无需再提交账号密码
+  if (s1 && s1.location) {
+    return {
+      ok: true,
+      location: withClientSign(s1.location, creds.sid, s1),
+      nonce: s1.nonce,
+      ssecurity: s1.ssecurity,
+      passToken: s1.passToken,
+      userId: String(s1.userId || ""),
+      cUserId: s1.cUserId ? String(s1.cUserId) : undefined,
+      step1: s1,
+    };
+  }
+  if (!s1 || !s1._sign) {
+    return { ok: false, error: "serviceLogin 未返回签名参数" };
+  }
+  const s2 = await step2(creds, deviceId, jar, s1);
+  // step2 偶尔不带 ssecurity，回退到 step1 的值
+  // （HA: self.ssecurity = auth.get('ssecurity', self.ssecurity)）
+  if (s2.ok && !s2.ssecurity && s1.ssecurity) {
+    s2.ssecurity = s1.ssecurity;
+  }
+  return s2;
 }
 
 /**
@@ -449,6 +516,45 @@ export async function verifyTicket(
 }
 
 /**
+ * GET 并手动跟随 3xx 跳转，沿途收集每一跳的 Set-Cookie。
+ * 等价于 hass-xiaomi-miot 里 `allow_redirects=True` 的行为。
+ */
+async function getWithRedirects(
+  url: string,
+  jar: CookieJar,
+  deviceId: string,
+  opts: { headers?: Record<string, string>; maxHops?: number } = {}
+): Promise<Response> {
+  const ua = userAgent(deviceId);
+  const maxHops = opts.maxHops ?? 5;
+  const doFetch = (target: string) => {
+    const headers: Record<string, string> = {
+      "User-Agent": ua,
+      ...(opts.headers || {}),
+    };
+    const ck = jar.header();
+    if (ck) headers["Cookie"] = ck;
+    return fetch(target, { method: "GET", headers, redirect: "manual" });
+  };
+  let cur = await doFetch(url);
+  jar.setFromHeaders(cur.headers);
+  let hops = 0;
+  while (
+    cur.status >= 300 &&
+    cur.status < 400 &&
+    cur.headers.get("location") &&
+    hops < maxHops
+  ) {
+    // Location 可能是相对路径，用当前 URL 解析成绝对地址
+    const next = new URL(cur.headers.get("location")!, cur.url).toString();
+    cur = await doFetch(next);
+    jar.setFromHeaders(cur.headers);
+    hops++;
+  }
+  return cur;
+}
+
+/**
  * step5: GET location 换取 serviceToken。
  * micoapi 的 sts 接口可能瞬时 401，重试一次。
  */
@@ -459,40 +565,10 @@ export async function fetchServiceToken(
   deviceId: string,
   retryOnce = true
 ): Promise<{ serviceToken?: string; userId?: string; retried401?: boolean; error?: string }> {
-  const doOnce = async () => {
-    const headers: Record<string, string> = {
-      "User-Agent": userAgent(deviceId),
-      "Content-Type": "application/x-www-form-urlencoded",
-    };
-    const ck = jar.header();
-    if (ck) headers["Cookie"] = ck;
-    const resp = await fetch(location, {
-      method: "GET",
-      headers,
-      redirect: "manual",
+  const doOnce = () =>
+    getWithRedirects(location, jar, deviceId, {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
     });
-    // 手动跟 302，收集每一跳的 cookie
-    let cur: Response = resp;
-    let hops = 0;
-    while (
-      cur.status >= 300 &&
-      cur.status < 400 &&
-      cur.headers.get("location") &&
-      hops < 5
-    ) {
-      jar.setFromHeaders(cur.headers);
-      const next = cur.headers.get("location")!;
-      const h2: Record<string, string> = {
-        "User-Agent": userAgent(deviceId),
-      };
-      const ck2 = jar.header();
-      if (ck2) h2["Cookie"] = ck2;
-      cur = await fetch(next, { method: "GET", headers: h2, redirect: "manual" });
-      hops++;
-    }
-    jar.setFromHeaders(cur.headers);
-    return cur;
-  };
 
   let resp = await doOnce();
   let retried401 = false;
@@ -519,6 +595,33 @@ export async function fetchServiceToken(
 }
 
 /**
+ * 用登录中间结果 + serviceToken 组装 mi-service-lite 需要的 MiAccount。
+ * 带上 cUserId：MiIOT 的请求 cookie 会用到它（account.pass.cUserId）。
+ */
+function makeAccount(
+  creds: XiaomiCreds,
+  deviceId: string,
+  s2: AuthStep12Result,
+  serviceToken: string,
+  userId?: string
+) {
+  return {
+    sid: creds.sid,
+    userId: userId || creds.userId,
+    password: creds.password,
+    deviceId,
+    did: undefined as string | undefined,
+    pass: {
+      ssecurity: s2.ssecurity,
+      nonce: s2.nonce,
+      passToken: s2.passToken,
+      cUserId: s2.cUserId,
+    },
+    serviceToken,
+  };
+}
+
+/**
  * 完整登录（不含验证码提交）：
  * 返回 { ok, account } 或 { ok:false, verifyRequired, verifyUrl, options }
  */
@@ -540,12 +643,8 @@ export async function xiaomiAuthLogin(
   const deviceId = creds.deviceId || randomDeviceId();
   const jar = new CookieJar();
   try {
-    const s1 = await step1(creds, deviceId, jar);
-    // step1 不要求 code==0，只要拿到 _sign/qs 就继续（mi-service-lite 同样逻辑）
-    if (!s1._sign) {
-      return { ok: false, verifyRequired: false, error: "serviceLogin 未返回签名参数" };
-    }
-    const s2 = await step2(creds, deviceId, jar, s1);
+    // step1(+step2)：已带会话时直接拿 location，否则提交账号密码
+    const s2 = await loginStep12(creds, deviceId, jar);
     if (s2.notificationUrl) {
       // 风控：走 identity/list 拿验证方式，然后显式下发验证码（step3b）
       const { options } = await checkIdentityList(s2.notificationUrl, jar, deviceId);
@@ -582,19 +681,7 @@ export async function xiaomiAuthLogin(
     if (!st.serviceToken) {
       return { ok: false, verifyRequired: false, error: st.error };
     }
-    const account = {
-      sid: creds.sid,
-      userId: st.userId || creds.userId,
-      password: creds.password,
-      deviceId,
-      did: undefined as string | undefined,
-      pass: {
-        ssecurity: s2.ssecurity,
-        nonce: s2.nonce,
-        passToken: s2.passToken,
-      },
-      serviceToken: st.serviceToken,
-    };
+    const account = makeAccount(creds, deviceId, s2, st.serviceToken, st.userId);
     return { ok: true, account };
   } catch (e: any) {
     return { ok: false, verifyRequired: false, error: e?.message ?? String(e) };
@@ -619,26 +706,15 @@ export async function xiaomiAuthVerifyAndLogin(
     if (!v.ok) {
       return { ok: false, error: v.error };
     }
-    // verify 成功后重走完整登录（此时风控已过，step2 会直接返回 location）
-    // hass-xiaomi-miot: 先跟 verify 返回的 location，再重走 step1→step2→step3
+    // verify 成功后重走完整登录。
+    // hass-xiaomi-miot: 先跟完 verify 返回的 location（allow_redirects=True），
+    // 拿到 passToken 等 cookie，再重走 step1(+step2)→step3。
+    // 注意：此时 serviceLogin 往往直接返回 code=0 + location（无 _sign），
+    // 所以必须走 loginStep12（会跳过 step2 并取到 ssecurity），不能强制要求 _sign。
     if (v.location) {
-      const headers: Record<string, string> = {
-        "User-Agent": userAgent(deviceId),
-      };
-      const ck = jar.header();
-      if (ck) headers["Cookie"] = ck;
-      const resp = await fetch(v.location, {
-        method: "GET",
-        headers,
-        redirect: "manual",
-      });
-      jar.setFromHeaders(resp.headers);
+      await getWithRedirects(v.location, jar, deviceId);
     }
-    const s1 = await step1(creds, deviceId, jar);
-    if (!s1._sign) {
-      return { ok: false, error: "验证后 serviceLogin 未返回签名参数" };
-    }
-    const s2 = await step2(creds, deviceId, jar, s1);
+    const s2 = await loginStep12(creds, deviceId, jar);
     if (s2.notificationUrl) {
       return { ok: false, error: "验证后仍触发风控，请稍后再试" };
     }
@@ -649,19 +725,7 @@ export async function xiaomiAuthVerifyAndLogin(
     if (!st.serviceToken) {
       return { ok: false, error: st.error };
     }
-    const account = {
-      sid: creds.sid,
-      userId: st.userId || creds.userId,
-      password: creds.password,
-      deviceId,
-      did: undefined as string | undefined,
-      pass: {
-        ssecurity: s2.ssecurity,
-        nonce: s2.nonce,
-        passToken: s2.passToken,
-      },
-      serviceToken: st.serviceToken,
-    };
+    const account = makeAccount(creds, deviceId, s2, st.serviceToken, st.userId);
     return { ok: true, account };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? String(e) };
