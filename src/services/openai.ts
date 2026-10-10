@@ -46,6 +46,13 @@ class OpenAIClient {
     // requestId: abortStreamCallback
   };
 
+  /** 清除缓存的 client，下次使用时按当前环境变量重建（配置页保存后调用） */
+  reset() {
+    this._client = undefined;
+    this.deployment = undefined;
+    this._abortCallbacks = {};
+  }
+
   cancel(requestId: string) {
     this._init();
     if (this._abortCallbacks[requestId]) {

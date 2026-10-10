@@ -1,0 +1,26 @@
+# MiGPT fork 私有版 — docker compose 示例
+# 构建：docker compose build
+# 启动：docker compose up -d
+# 管理页：http://<宿主机IP>:8090
+#
+# 说明：
+# - 容器启动后跑 Web 管理页，不会自动登录小米（彻底告别启动即崩、重启刷接口）。
+# - 在 Web 页填好配置，点"授权登录"才走小米登录；触发风控时验证链接直接显示在页面上点开即可。
+# - conf 目录挂载到宿主机，config.json 持久化保存。
+
+services:
+mi-gpt:
+build:.
+image: migpt-fork:latest
+container_name: mi-gpt
+restart: unless-stopped
+ports:
+- "8090:8090"
+volumes:
+-./conf:/app/conf
+environment:
+# 绕开宿主机代理：小米登录必须走家里直连 IP，否则触发异地风控
+- HTTP_PROXY=
+- HTTPS_PROXY=
+- http_proxy=
+- https_proxy=

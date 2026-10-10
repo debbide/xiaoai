@@ -24,6 +24,10 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 
 FROM base as release
 
+# Web 管理页端口；配置目录（挂载卷持久化 config.json）
+EXPOSE 8090
+RUN mkdir -p /app/conf
+
 COPY app.js .
 COPY package.json .
 COPY --from=dist /app/dist ./dist

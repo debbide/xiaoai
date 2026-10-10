@@ -3,6 +3,7 @@ import { fastRetry } from "../../utils/retry";
 import { kAreYouOK } from "../../utils/string";
 import { BaseSpeaker, BaseSpeakerConfig } from "./base";
 import { StreamResponse } from "./stream";
+import { Status } from "../status";
 
 export interface QueryMessage {
   text: string;
@@ -71,10 +72,15 @@ export class Speaker extends BaseSpeaker {
   }
 
   async run() {
-    await this.initMiServices();
-    if (!this.MiNA) {
-      this.stop();
+    const ok = await this.initMiServices();
+    if (!ok || !this.MiNA) {
+      // 登录失败：只打日志，不抛错、不退出进程。
+      // 原因（验证链接等）已写入 Status，Web 管理页展示并支持手动重试。
+      this.logger.error("小米登录失败，语音服务未启动。请打开 Web 管理页查看原因。");
+      Status.service = "stopped";
+      return;
     }
+    Status.service = "running";
     this.logger.success("服务已启动...");
     this.activeKeepAliveMode();
     const retry = fastRetry(this, "消息列表");

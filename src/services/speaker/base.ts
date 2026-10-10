@@ -1,16 +1,11 @@
-import {
-  MiIOT,
-  MiNA,
-  MiServiceConfig,
-  getMiIOT,
-  getMiNA,
-} from "mi-service-lite";
+import type { MiIOT, MiNA, MiServiceConfig } from "mi-service-lite";
 import { clamp, sleep } from "../../utils/base";
 import { jsonEncode } from "../../utils/parse";
 import { Logger } from "../../utils/log";
 import { StreamResponse } from "./stream";
 import { kAreYouOK } from "../../utils/string";
 import { fastRetry } from "../../utils/retry";
+import { xiaomiLogin } from "../xiaomi";
 
 export type TTSProvider = "xiaoai" | "custom";
 
@@ -126,10 +121,35 @@ export class BaseSpeaker {
     this.playingCommand = playingCommand;
   }
 
-  async initMiServices() {
-    this.MiNA = await getMiNA(this.config);
-    this.MiIOT = await getMiIOT(this.config);
-    this.logger.assert(!!this.MiNA && !!this.MiIOT, "初始化 Mi Services 失败");
+  /**
+   * 把外部已登录好的会话注入进来（Web 页“授权登录”走的流程），
+   * 避免 Speaker.run() 里重复登录刷小米接口。
+   */
+  setSession(miNA: MiNA, miIOT: MiIOT) {
+    this.MiNA = miNA;
+    this.MiIOT = miIOT;
+  }
+
+  /**
+   * 初始化小米服务。
+   * @returns 是否成功；失败时只打日志、绝不抛错（由 Web 页展示原因并手动重试）。
+   */
+  async initMiServices(): Promise<boolean> {
+    if (this.MiNA && this.MiIOT) {
+      this.logDeviceInfo();
+      return true;
+    }
+    const res = await xiaomiLogin(this.config);
+    if (res.ok && res.miNA && res.miIOT) {
+      this.MiNA = res.miNA;
+      this.MiIOT = res.miIOT;
+      this.logDeviceInfo();
+      return true;
+    }
+    return false;
+  }
+
+  private logDeviceInfo() {
     if (this.debug) {
       const d: any = this.MiIOT!.account?.device;
       this.logger.debug(

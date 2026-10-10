@@ -5,6 +5,8 @@ import { kBannerASCII } from "./utils/string";
 import { Logger } from "./utils/log";
 import { deleteFile } from "./utils/io";
 
+export { boot } from "./boot";
+
 export type MiGPTConfig = Omit<MyBotConfig, "speaker"> & {
   speaker: Omit<AISpeakerConfig, "name">;
 };
