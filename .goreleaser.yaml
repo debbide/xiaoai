@@ -12,7 +12,6 @@ before:
   hooks:
     - sh -c "cd apps/client && go mod tidy && go mod download"
     - sh -c "cd pkg/music && go mod tidy && go mod download"
-    - sh -c "cd apps/gemini && go mod tidy && go mod download"
     - sh -c "cd apps/chat && go mod tidy && go mod download"
 
 builds:
@@ -34,21 +33,6 @@ builds:
       - "6"
       - "7"
 
-  - id: gemini
-    dir: apps/gemini
-    binary: gemini
-    main: .
-    env:
-      - CGO_ENABLED=0
-    ldflags:
-      - -s -w
-    goos:
-      - linux
-      - windows
-      - darwin
-    goarch:
-      - amd64
-      - arm64
   - id: chat
     dir: apps/chat
     binary: chat
@@ -66,7 +50,7 @@ builds:
       - arm64
 
 upx:
-  - ids: [client, gemini, chat]
+  - ids: [client, chat]
     enabled: false
     
 archives:
@@ -80,19 +64,6 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
-  - id: gemini
-    builds: [gemini]
-    formats: [tar.gz]
-    name_template: >-
-      gemini_
-      {{- title .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
-    format_overrides:
-      - goos: windows
-        formats: [zip]
   - id: chat
     builds: [chat]
     formats: [tar.gz]
