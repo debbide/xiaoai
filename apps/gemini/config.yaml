@@ -1,0 +1,34 @@
+# 服务端监听配置
+server:
+  host: "0.0.0.0"
+  port: 4399
+
+# WebSocket 认证（users 为空则跳过验证）
+auth:
+  users: []
+  # users:
+  #   - username: "alice"
+  #     password: "secret1"
+  #   - username: "bob"
+  #     password: "secret2"
+
+# HTTP 代理（可选，用于无法直连 AI API 时，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）
+proxy: "http://127.0.0.1:7890"
+
+# Gemini API 配置
+gemini:
+  # API 密钥（也可通过环境变量 GEMINI_API_KEY 设置，环境变量优先）
+  api_key: "你的 API KEY"
+  # model: "gemini-3-flash-preview"
+  model: "gemini-3.1-flash-live-preview"
+  # 系统提示词
+  system_instruction: "你是小爱音箱，请用中文回答用户的问题。"
+  # 语音合成配置
+  speech:
+    language: "cmn-CN"
+    voice: "Leda"
+
+# 注意：gemini-go 当前是半双工模式，AI 说话时无法中途打断；请等 AI 说完再开口。
+
+# 连接成功后播放的提示语
+greeting: "已连接"

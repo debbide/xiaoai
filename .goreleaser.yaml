@@ -1,0 +1,126 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+
+# The lines below are called `modelines`. See `:help modeline`
+# Feel free to remove those if you don't want/need to use them.
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 2
+
+before:
+  hooks:
+    - sh -c "cd apps/client && go mod tidy && go mod download"
+    - sh -c "cd pkg/music && go mod tidy && go mod download"
+    - sh -c "cd apps/gemini && go mod tidy && go mod download"
+    - sh -c "cd apps/chat && go mod tidy && go mod download"
+
+builds:
+  - id: client
+    dir: apps/client
+    binary: client
+    main: ./cmd/client/
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+    goarch:
+      - arm64
+      - arm
+    goarm:
+      - "5"
+      - "6"
+      - "7"
+
+  - id: gemini
+    dir: apps/gemini
+    binary: gemini
+    main: .
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+  - id: chat
+    dir: apps/chat
+    binary: chat
+    main: .
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+upx:
+  - ids: [client, gemini, chat]
+    enabled: false
+    
+archives:
+  - id: client
+    builds: [client]
+    formats: [tar.gz]
+    name_template: >-
+      client_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+  - id: gemini
+    builds: [gemini]
+    formats: [tar.gz]
+    name_template: >-
+      gemini_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+  - id: chat
+    builds: [chat]
+    formats: [tar.gz]
+    name_template: >-
+      chat_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  draft: true
+  replace_existing_draft: true
+  prerelease: auto
+  name_template: "{{.ProjectName}}-v{{.Version}}-{{.Date}}"
+  footer: >-
+
+    ---
+
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).

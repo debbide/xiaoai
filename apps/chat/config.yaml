@@ -1,0 +1,100 @@
+# 服务端监听配置
+server:
+  host: "0.0.0.0"
+  port: 4399
+
+# WebSocket 认证（users 为空则跳过验证）
+auth:
+  users: []
+  # users:
+  #   - username: "alice"
+  #     password: "secret1"
+  #   - username: "bob"
+  #     password: "secret2"
+
+# HTTP 代理（可选，用于无法直连 API 时，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）
+# proxy: "http://127.0.0.1:7890"
+
+# LLM API 配置（支持 OpenAI 兼容接口，如 OpenAI / Claude / DeepSeek / 通义千问）
+# Claude 可通过 OpenRouter 使用：base_url: https://openrouter.ai/api/v1，model: anthropic/claude-3.5-sonnet
+llm:
+  # 接口 base url，通常以 /v1 结尾
+  # base_url: "https://api.openai.com/v1"
+  # base_url: "https://openrouter.ai/api/v1"   # Claude 等（需 OpenRouter API Key）
+  base_url: "https://api.deepseek.com"
+  # API 密钥
+  api_key: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  # 模型名称
+  # model: "gpt-4.1-mini"
+  # model: "anthropic/claude-3.5-sonnet"       # 通过 OpenRouter
+  model: "deepseek-v4-flash"
+
+# 系统提示词
+prompt:
+  system: "你是一个智能助手，请根据用户的问题给出回答。"
+
+# 上下文配置
+context:
+  # 每次对话携带的最大历史消息数（0 = 关闭）
+  history_max_length: 1
+
+# 打断配置：仅当关键词或唤醒词匹配时才打断
+interrupt:
+  keywords:
+    - "闭嘴"
+    - "停止"
+    - "暂停"
+    - "停一下"
+    - "不要说了"
+    - "别说了"
+  match_mode: "prefix"   # exact, prefix, contains
+  kws_interrupt: true   # 唤醒词也触发打断
+
+# 只回答以下关键词开头的消息（用于 AI 回复判断）
+call_ai_keywords:
+  - "豆包"
+  - "小度"
+
+# 连接成功后播放的提示语
+greeting: "已连接"
+
+# 出错时的提示语
+error_message: "出错了，请稍后再试吧！"
+
+# AI 回复前缀：在 AI 第一句话之前播一段固定提示，便于与小爱原生回复 / 音乐 / 系统音区分。
+# 仅作用于通过 LLM 走完整流程的 AI 回复；自定义回复(custom_replies)、错误提示(error_message)
+# 不会被加前缀。留空 "" 关闭该功能。
+reply_prefix: "AI回复"
+
+# 自定义固定回复（精确匹配用户消息）
+custom_replies:
+  - match: "测试播放文字"
+    text: "你好，很高兴认识你！"
+  # - match: "测试播放音乐"
+  #   url: "https://example.com/hello.mp3"
+
+# 本地音乐模块（可选）
+# music:
+#   enabled: true
+#   dirs:
+#     - /path/to/music
+#   lx:
+#     enabled: true
+#     base_url: "http://localhost:9527"
+#     # 推荐使用普通用户 token，或配置 username/password 自动登录获取 token
+#     user_token: ""
+#     username: "your_lx_user"
+#     password: "your_lx_password"
+#     # 可选：管理员鉴权；不建议日常播放依赖 admin 口令
+#     frontend_auth: ""
+#     # true 时通过 LX 代理下载到本地后播放；false 时直接播放 LX 返回的远程 URL
+#     download: false
+#     # 空则下载到 music.dirs[0]
+#     download_dir: ""
+#     # LX 音源：kw=酷我，tx=QQ音乐，wy=网易云，kg=酷狗，mg=咪咕
+#     source: "kw"
+#     # 128k / 320k / flac，取决于源和歌曲
+#     quality: "128k" 
+#   commands:
+#     # 默认 true：播放本地歌曲前打断小爱云端 NLP，避免云端试听版 URL 覆盖本地播放
+#     abort_xiaoai_on_play: true
