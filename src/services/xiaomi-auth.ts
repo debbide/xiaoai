@@ -13,7 +13,9 @@
  *   step2: POST /pass/serviceLoginAuth2 提交账号密码
  *          → 成功返回 location；风控返回 notificationUrl
  *   step3: GET {notificationUrl → identity/list} 拿 identity_session + 验证方式
- *          （这一步会触发小米下发短信/邮件验证码）
+ *   step3b: POST /identity/auth/sendPhoneTicket|sendEmailTicket 下发短信/邮件验证码
+ *          （identity/list 不会触发下发，必须显式调用；参考
+ *           PiotrMachowski/Xiaomi-cloud-tokens-extractor 的 do_2fa_email_flow）
  *   step4: POST /identity/auth/verifyPhone|verifyEmail 提交用户输入的验证码
  *          → 成功后重走 step1→step2→step5
  *   step5: GET location 拿 serviceToken（micoapi 的 sts 401 则重试一次）
@@ -292,12 +294,21 @@ async function step2(
 
 /**
  * step3: 风控时调用 identity/list，获取验证方式并持久化 identity_session。
- * 调用后小米会向用户手机/邮箱下发验证码。
+ * 注意：这一步只返回验证方式，不会触发短信/邮件下发，下发靠 step3b 的 send 接口。
  */
 export async function checkIdentityList(
   verifyUrl: string,
-  jar: CookieJar
+  jar: CookieJar,
+  deviceId?: string
 ): Promise<{ options: number[]; identitySession: string }> {
+  // 先打开 authStart 页面（token_extractor 同样做法），让服务端下发 ick 等 cookie
+  try {
+    await httpGet(verifyUrl, jar, {
+      headers: deviceId ? { "User-Agent": userAgent(deviceId) } : {},
+    });
+  } catch (e) {
+    logger.error("打开 authStart 页面异常（继续）", (e as any)?.message ?? e);
+  }
   const listUrl = verifyUrl.replace(
     "fe/service/identity/authStart",
     "identity/list"
@@ -314,18 +325,84 @@ export async function checkIdentityList(
   return { options, identitySession };
 }
 
+/** 从 notificationUrl 提取 context 参数（send/verify 接口需要原样回传） */
+function extractContext(verifyUrl: string): string {
+  try {
+    return new URL(verifyUrl).searchParams.get("context") || "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * step3b: 下发短信/邮箱验证码。
+ *
+ * identity/list 只返回验证方式，不会触发下发；必须显式调用：
+ *   POST /identity/auth/sendPhoneTicket（手机短信，flag=4）
+ *   POST /identity/auth/sendEmailTicket（邮箱，flag=8）
+ * 参数照抄 token_extractor 的 do_2fa_email_flow（经实测可用的流程）。
+ */
+export async function sendVerifyTicket(
+  flag: number,
+  verifyUrl: string,
+  sid: string,
+  jar: CookieJar,
+  deviceId: string
+): Promise<{ ok: boolean; error?: string }> {
+  const api =
+    flag === 4
+      ? "/identity/auth/sendPhoneTicket"
+      : "/identity/auth/sendEmailTicket";
+  const context = extractContext(verifyUrl);
+  const r = await httpPost(api, jar, {
+    params: {
+      _dc: String(Date.now()),
+      sid,
+      context,
+      mask: "0",
+      _locale: "zh_CN",
+    },
+    form: {
+      retry: "0",
+      icode: "",
+      _json: "true",
+      ick: jar.get("ick") || "",
+    },
+    headers: { "User-Agent": userAgent(deviceId) },
+  });
+  const j: any = r.json || {};
+  if (j.code === 0 || j.result === "ok") {
+    logger.success(
+      `验证码已下发（flag=${flag}，${flag === 4 ? "手机短信" : "邮箱"}）`
+    );
+    return { ok: true };
+  }
+  const msg = `发送验证码异常 flag=${flag} HTTP=${r.status} resp=${JSON.stringify(
+    j
+  ).slice(0, 300)}`;
+  logger.error(msg);
+  return {
+    ok: false,
+    error: `发送验证码失败（code=${j.code ?? "?"} ${j.desc || j.message || ""}）`,
+  };
+}
+
 /**
  * step4: 提交用户输入的短信/邮箱验证码。
- * 成功返回 { code: 0, location }，之后要重走 step1→step2→step5。
+ * 参数照抄 token_extractor 的 do_2fa_email_flow（query 带 sid/context/mask/_locale，
+ * 表单带 ick），成功返回 { code: 0, location }，之后要重走 step1→step2→step5。
  */
 export async function verifyTicket(
   ticket: string,
   verifyUrl: string,
-  jar: CookieJar
+  jar: CookieJar,
+  opts: { sid?: string; deviceId?: string } = {}
 ): Promise<{ ok: boolean; location?: string; error?: string }> {
   const persisted = loadIdentitySession();
   if (persisted) jar.set("identity_session", persisted);
-  const { options } = await checkIdentityList(verifyUrl, jar);
+  const { options } = await checkIdentityList(verifyUrl, jar, opts.deviceId);
+  const context = extractContext(verifyUrl);
+  const sid = opts.sid || "";
   let last: any = null;
   for (const flag of options) {
     const api =
@@ -336,13 +413,23 @@ export async function verifyTicket(
           : null;
     if (!api) continue;
     const r = await httpPost(api, jar, {
-      params: { _dc: String(Date.now()) },
+      params: {
+        _dc: String(Date.now()),
+        _flag: String(flag),
+        _json: "true",
+        ...(sid ? { sid } : {}),
+        ...(context ? { context } : {}),
+        mask: "0",
+        _locale: "zh_CN",
+      },
       form: {
         _flag: String(flag),
         ticket: ticket.trim(),
         trust: "false",
         _json: "true",
+        ick: jar.get("ick") || "",
       },
+      headers: opts.deviceId ? { "User-Agent": userAgent(opts.deviceId) } : {},
       cookies: { identity_session: jar.get("identity_session") || "" },
     });
     last = r.json;
@@ -444,6 +531,9 @@ export async function xiaomiAuthLogin(
       verifyRequired: boolean;
       verifyUrl?: string;
       options?: number[];
+      /** 验证码是否已下发（sendPhoneTicket/sendEmailTicket 成功） */
+      codeSent?: boolean;
+      sendError?: string;
       error?: string;
     }
 > {
@@ -457,13 +547,32 @@ export async function xiaomiAuthLogin(
     }
     const s2 = await step2(creds, deviceId, jar, s1);
     if (s2.notificationUrl) {
-      // 风控：走 identity/list，下发验证码
-      const { options } = await checkIdentityList(s2.notificationUrl, jar);
+      // 风控：走 identity/list 拿验证方式，然后显式下发验证码（step3b）
+      const { options } = await checkIdentityList(s2.notificationUrl, jar, deviceId);
+      // 优先手机短信(4)，其次邮箱(8)
+      const flag = options.includes(4) ? 4 : options.includes(8) ? 8 : options[0];
+      let codeSent = false;
+      let sendError = "";
+      if (flag === 4 || flag === 8) {
+        const sent = await sendVerifyTicket(
+          flag,
+          s2.notificationUrl,
+          creds.sid,
+          jar,
+          deviceId
+        );
+        codeSent = sent.ok;
+        sendError = sent.error || "";
+      } else {
+        sendError = `不支持的验证方式: ${JSON.stringify(options)}`;
+      }
       return {
         ok: false,
         verifyRequired: true,
         verifyUrl: s2.notificationUrl,
         options,
+        codeSent,
+        sendError,
       };
     }
     if (!s2.ok || !s2.location) {
@@ -503,7 +612,10 @@ export async function xiaomiAuthVerifyAndLogin(
   const deviceId = creds.deviceId || randomDeviceId();
   const jar = new CookieJar();
   try {
-    const v = await verifyTicket(ticket, verifyUrl, jar);
+    const v = await verifyTicket(ticket, verifyUrl, jar, {
+      sid: creds.sid,
+      deviceId,
+    });
     if (!v.ok) {
       return { ok: false, error: v.error };
     }
