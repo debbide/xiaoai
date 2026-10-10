@@ -334,7 +334,25 @@ async function loginStep12(
   jar: CookieJar
 ): Promise<AuthStep12Result> {
   const s1 = await step1(creds, deviceId, jar);
-  // 已认证：serviceLogin 直接给出 location，无需再提交账号密码
+  const fields = s1 && !s1._raw ? Object.keys(s1).join(",") : "(解析失败)";
+  logger.log(`serviceLogin[${creds.sid}] 返回字段: ${fields}`);
+
+  // 顺序很关键：必须先判 _sign。
+  // 未登录时 serviceLogin 的响应也可能带 location（callback 落地地址），
+  // 若先判 location 就会误跳过 serviceLoginAuth2 → 拿不到 ssecurity，
+  // 后续 api.io.mi.com 签名失败（表现为 MiIOT.getDevice 报
+  // “The "data" argument must be of type string ... Received undefined”）。
+  // 参考 Xiaomi-cloud-tokens-extractor login_step_1：先查 _sign，再查 ssecurity。
+  if (s1 && s1._sign) {
+    const s2 = await step2(creds, deviceId, jar, s1);
+    // step2 偶尔不带 ssecurity，回退到 step1 的值
+    // （HA: self.ssecurity = auth.get('ssecurity', self.ssecurity)）
+    if (s2.ok && !s2.ssecurity && s1.ssecurity) {
+      s2.ssecurity = s1.ssecurity;
+    }
+    return s2;
+  }
+  // 已带有效会话：serviceLogin 直接给出 location + ssecurity，无需再提交账号密码
   if (s1 && s1.location) {
     return {
       ok: true,
@@ -347,16 +365,7 @@ async function loginStep12(
       step1: s1,
     };
   }
-  if (!s1 || !s1._sign) {
-    return { ok: false, error: "serviceLogin 未返回签名参数" };
-  }
-  const s2 = await step2(creds, deviceId, jar, s1);
-  // step2 偶尔不带 ssecurity，回退到 step1 的值
-  // （HA: self.ssecurity = auth.get('ssecurity', self.ssecurity)）
-  if (s2.ok && !s2.ssecurity && s1.ssecurity) {
-    s2.ssecurity = s1.ssecurity;
-  }
-  return s2;
+  return { ok: false, error: "serviceLogin 未返回签名参数" };
 }
 
 /**
@@ -677,6 +686,15 @@ export async function xiaomiAuthLogin(
     if (!s2.ok || !s2.location) {
       return { ok: false, verifyRequired: false, error: s2.error || "登录失败" };
     }
+    if (!s2.ssecurity) {
+      // 没有 ssecurity 就没法给 api.io.mi.com 签名，这里明确报错，
+      // 而不是等到 MiIOT.getDevice 里抛 crypto 异常（信息量为零）
+      return {
+        ok: false,
+        verifyRequired: false,
+        error: "登录响应缺少 ssecurity，无法为 api.io.mi.com 签名（请重试；持续出现请反馈日志）",
+      };
+    }
     const st = await fetchServiceToken(s2.location, jar, creds.sid, deviceId, true);
     if (!st.serviceToken) {
       return { ok: false, verifyRequired: false, error: st.error };
@@ -720,6 +738,12 @@ export async function xiaomiAuthVerifyAndLogin(
     }
     if (!s2.ok || !s2.location) {
       return { ok: false, error: s2.error || "验证后登录失败" };
+    }
+    if (!s2.ssecurity) {
+      return {
+        ok: false,
+        error: "验证后登录响应缺少 ssecurity，无法为 api.io.mi.com 签名（请重试；持续出现请反馈日志）",
+      };
     }
     const st = await fetchServiceToken(s2.location, jar, creds.sid, deviceId, true);
     if (!st.serviceToken) {

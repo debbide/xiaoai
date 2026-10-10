@@ -63,13 +63,39 @@ async function buildClients(
     await MiNA.getDevice(acc).catch((e: any) =>
       logger.error("MiNA.getDevice 异常", e?.message ?? e)
     );
+    if (!acc.device) {
+      logger.error(
+        `MiNA 未匹配到设备（did="${did ?? ""}"）。did 留空或名称不一致都会取不到，` +
+          "请填米家 App 里一字不差的音箱名称。"
+      );
+    }
     miNA = new MiNA(acc);
   }
   if (accounts["xiaomiio"]) {
     const acc = { ...accounts["xiaomiio"], did };
-    await MiIOT.getDevice(acc).catch((e: any) =>
-      logger.error("MiIOT.getDevice 异常", e?.message ?? e)
-    );
+    if (!acc.pass?.ssecurity) {
+      // 没有 ssecurity 时 MiIOT 任何请求都会在签名阶段崩掉，这里提前说清楚
+      logger.error(
+        "xiaomiio 账号缺少 ssecurity，MiIOT 无法工作（设备查询/控制都会失败）"
+      );
+    } else {
+      await MiIOT.getDevice(acc).catch((e: any) =>
+        logger.error("MiIOT.getDevice 异常", e?.message ?? e)
+      );
+      if (!acc.device) {
+        // 帮用户列出账号下的设备名，方便改正配置里的 did
+        const names: string[] = await new MiIOT(acc)
+          .getDevices()
+          .then((r: any) =>
+            ((r as any)?.list ?? []).map((d: any) => d?.name).filter(Boolean)
+          )
+          .catch(() => []);
+        logger.error(
+          `MiIOT 未匹配到设备（did="${did ?? ""}"）。账号下的设备名：` +
+            (names.length ? names.join(" / ") : "(获取失败，请检查账号状态)")
+        );
+      }
+    }
     miIOT = new MiIOT(acc);
   }
   return { miNA, miIOT };
