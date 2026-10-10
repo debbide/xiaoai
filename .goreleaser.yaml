@@ -86,8 +86,8 @@ changelog:
       - "^test:"
 
 release:
-  draft: true
-  replace_existing_draft: true
+  draft: false
+  replace_existing_draft: false
   prerelease: auto
   name_template: "{{.ProjectName}}-v{{.Version}}-{{.Date}}"
   footer: >-
