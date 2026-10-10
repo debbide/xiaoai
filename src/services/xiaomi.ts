@@ -149,7 +149,9 @@ export async function xiaomiLogin(config: {
       const optText = (v.options || [4])
         .map((o: number) => (o === 4 ? "手机短信" : o === 8 ? "邮箱" : `方式${o}`))
         .join("/");
-      Status.lastError = v.codeSent
+      Status.lastError = v.reused
+        ? `小米账号 [${sid}] 触发安全验证，${v.sendError}`
+        : v.codeSent
         ? `小米账号 [${sid}] 触发安全验证，验证码已发送（${optText}），请在下方输入后提交`
         : `小米账号 [${sid}] 触发安全验证，验证码发送失败（${v.sendError || "未知错误"}），请稍后点“授权登录”重试`;
       logger.error(`小米登录 [${sid}] 触发风控，等待验证码`);

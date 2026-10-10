@@ -231,6 +231,27 @@ function seedSessionCookies(jar: CookieJar, s?: PersistedSession) {
   if (is) jar.set("identity_session", is);
 }
 
+/**
+ * 同一账号多久之内不重复下发验证码。
+ * 小米对 sendPhoneTicket 有频控，连续点「授权登录」会反复触发下发，
+ * 直接把自己送进 code=70022「验证码发送过多，请明天再试」的 24h 冷却。
+ * 小米短信码本身有效期数分钟，所以窗口内直接复用上一条即可。
+ */
+const TICKET_RESEND_INTERVAL_MS = 3 * 60 * 1000;
+
+/** 频控是按账号/手机号算的，不是按 sid，所以这里用全局时间戳而不是分 sid 存 */
+function lastTicketSentAt(): number {
+  return readState()?.ticketSentAt || 0;
+}
+
+function markTicketSent() {
+  patchState({ ticketSentAt: Date.now() });
+}
+
+function clearTicketSent() {
+  patchState({ ticketSentAt: 0 });
+}
+
 /* ---------------- 工具 ---------------- */
 
 function md5upper(s: string): string {
@@ -748,8 +769,10 @@ export async function xiaomiAuthLogin(
       verifyRequired: boolean;
       verifyUrl?: string;
       options?: number[];
-      /** 验证码是否已下发（sendPhoneTicket/sendEmailTicket 成功） */
+      /** 验证码是否已下发（sendPhoneTicket/sendEmailTicket 成功，或复用了刚发的那条） */
       codeSent?: boolean;
+      /** true 表示没重新下发，复用的是几分钟前刚发的那条验证码 */
+      reused?: boolean;
       sendError?: string;
       error?: string;
     }
@@ -779,17 +802,32 @@ export async function xiaomiAuthLogin(
       // 优先手机短信(4)，其次邮箱(8)
       const flag = options.includes(4) ? 4 : options.includes(8) ? 8 : options[0];
       let codeSent = false;
+      let reused = false;
       let sendError = "";
       if (flag === 4 || flag === 8) {
-        const sent = await sendVerifyTicket(
-          flag,
-          s2.notificationUrl,
-          creds.sid,
-          jar,
-          deviceId
-        );
-        codeSent = sent.ok;
-        sendError = sent.error || "";
+        const since = Date.now() - lastTicketSentAt();
+        if (since < TICKET_RESEND_INTERVAL_MS) {
+          // 刚发过：绝不重复下发。上一条验证码通常仍然有效，
+          // 直接让用户用它，避免连续点击把自己送进 70022 冷却。
+          codeSent = true;
+          reused = true;
+          const left = Math.ceil((TICKET_RESEND_INTERVAL_MS - since) / 1000);
+          sendError = `验证码 ${Math.round(
+            since / 1000
+          )} 秒前已发送，请使用上一条短信（${left} 秒后才可重发）`;
+          logger.log(`[${creds.sid}] ${sendError}`);
+        } else {
+          const sent = await sendVerifyTicket(
+            flag,
+            s2.notificationUrl,
+            creds.sid,
+            jar,
+            deviceId
+          );
+          codeSent = sent.ok;
+          sendError = sent.error || "";
+          if (sent.ok) markTicketSent();
+        }
       } else {
         sendError = `不支持的验证方式: ${JSON.stringify(options)}`;
       }
@@ -799,6 +837,7 @@ export async function xiaomiAuthLogin(
         verifyUrl: s2.notificationUrl,
         options,
         codeSent,
+        reused,
         sendError,
       };
     }
@@ -829,6 +868,8 @@ export async function xiaomiAuthLogin(
       nonce: s2.nonce,
       serviceToken: st.serviceToken,
     });
+    // 登录成功，重置验证码下发时间戳（下次真的需要重发时不会再被拦）
+    clearTicketSent();
     return { ok: true, account };
   } catch (e: any) {
     return { ok: false, verifyRequired: false, error: e?.message ?? String(e) };
@@ -893,6 +934,8 @@ export async function xiaomiAuthVerifyAndLogin(
       nonce: s2.nonce,
       serviceToken: st.serviceToken,
     });
+    // 登录成功，重置验证码下发时间戳（下次真的需要重发时不会再被拦）
+    clearTicketSent();
     return { ok: true, account };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? String(e) };
