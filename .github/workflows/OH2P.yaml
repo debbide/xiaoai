@@ -6,6 +6,10 @@ on:
         description: " 请输入 OTA 版本信息（JSON：{\"url\":\"...\",\"model\":\"OH2P\",\"version\":\"1.58.6\"}）"
         type: string
         required: true
+      tag:
+        description: "Release tag（留空则自动生成）"
+        type: string
+        required: false
 
 jobs:
   build:
@@ -36,7 +40,11 @@ jobs:
           bash build.sh
           MODEL=$(cat assets/.model)
           VERSION=$(cat assets/.version)
-          TAG=${MODEL}_${VERSION}
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG=${MODEL}_${VERSION}
+          fi
           FIRMWARE=$(basename $(ls assets/*.bin 2>/dev/null | head -n 1) .bin)
           cp assets/$FIRMWARE/root.squashfs assets/${TAG}.squashfs
           cp assets/$FIRMWARE/root-patched.squashfs assets/${TAG}_patched.squashfs
