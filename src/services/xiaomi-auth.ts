@@ -103,27 +103,132 @@ function cookiesPath(): string {
   return path.join(path.dirname(configPath()), "cookies.json");
 }
 
-export function saveIdentitySession(identitySession: string) {
+/**
+ * cookies.json 里持久化的单个 sid 登录会话（对齐 mi-service-lite 的 .mi.json）。
+ * 见 loadSession() 的注释说明为什么必须有它。
+ */
+interface PersistedSession {
+  deviceId?: string;
+  userId?: string;
+  cUserId?: string;
+  passToken?: string;
+  ssecurity?: string;
+  nonce?: string;
+  serviceToken?: string;
+  updatedAt?: number;
+}
+
+function readState(): any {
   try {
     const p = cookiesPath();
-    const cur = exists(p) ? (readJSONSync(p) as any) : {};
-    cur.identity_session = identitySession;
-    cur.updatedAt = Date.now();
-    writeJSON(p, cur);
-  } catch (e) {
-    logger.error("保存 identity_session 失败", e);
+    return exists(p) ? (readJSONSync(p) as any) || {} : {};
+  } catch {
+    return {};
   }
 }
 
-export function loadIdentitySession(): string | undefined {
+function patchState(patch: Record<string, any>) {
   try {
-    const p = cookiesPath();
-    if (!exists(p)) return undefined;
-    const cur = readJSONSync(p) as any;
-    return cur?.identity_session;
-  } catch {
-    return undefined;
+    writeJSON(cookiesPath(), { ...readState(), ...patch, updatedAt: Date.now() });
+  } catch (e) {
+    logger.error("保存登录状态失败", e);
   }
+}
+
+export function saveIdentitySession(identitySession: string) {
+  patchState({ identity_session: identitySession });
+}
+
+export function loadIdentitySession(): string | undefined {
+  return readState()?.identity_session;
+}
+
+/**
+ * 读取某个 sid 上次登录留下的会话。
+ *
+ * 为什么必须持久化（这是「上个版本不用输验证码、这个版本却要」的根因）：
+ * mi-service-lite 的原实现 getMiService() 会把整个 account 写到 .mi.json，
+ * 下次启动时复用其中的 deviceId 和 pass.passToken，作为 cookie 发给
+ * serviceLogin（见其 _getLoginCookies）。服务端据此认出「这台可信设备」，
+ * 直接返回 code=0 + location，跳过 serviceLoginAuth2，也**不会**下发验证码。
+ *
+ * 本 fork 重写登录流程时丢掉了这层持久化：
+ *   - deviceId 每次都是 randomDeviceId()，从未落盘；
+ *   - 每次都是 new CookieJar()，不带任何历史 cookie；
+ * → 小米每次都当成陌生设备登录 → 每次都要求验证码 → 反复调用
+ *   sendPhoneTicket → 撞上 code=70022「验证码发送过多，请明天再试」。
+ *
+ * 修复：把 deviceId / passToken / userId / cUserId 落盘并在下次登录时复用。
+ * 注意：全新设备第一次仍需验证一次，验证通过后 passToken 落盘，之后即可免验证码。
+ */
+export function loadSession(sid: string): PersistedSession | undefined {
+  migrateLegacyMiJson();
+  return readState()?.sessions?.[sid];
+}
+
+let migratedLegacy = false;
+
+/**
+ * 一次性把 mi-service-lite 遗留的 .mi.json 会话迁移进来。
+ * 老版本（用 mi-service-lite getMiNA/getMiIOT 的那版）会把可信设备写在那里，
+ * 迁移过来后可能直接免验证码登录，省掉重新验证。
+ */
+function migrateLegacyMiJson() {
+  if (migratedLegacy) return;
+  migratedLegacy = true;
+  const cands = [
+    path.join(process.cwd(), ".mi.json"),
+    path.join(path.dirname(configPath()), ".mi.json"),
+  ];
+  const map: Record<string, string> = { miiot: "xiaomiio", mina: "micoapi" };
+  for (const p of cands) {
+    try {
+      if (!exists(p)) continue;
+      const raw = readJSONSync(p) as any;
+      if (!raw || typeof raw !== "object") continue;
+      let n = 0;
+      for (const key of Object.keys(map)) {
+        const a = raw[key];
+        if (!a) continue;
+        const sid = map[key];
+        if (loadSession(sid)?.passToken) continue; // 已有更新会话，不覆盖
+        saveSession(sid, {
+          deviceId: a.deviceId,
+          userId: a.userId != null ? String(a.userId) : undefined,
+          cUserId: a.pass?.cUserId != null ? String(a.pass.cUserId) : undefined,
+          passToken: a.pass?.passToken,
+          ssecurity: a.pass?.ssecurity,
+          nonce: a.pass?.nonce,
+          serviceToken: a.serviceToken,
+        });
+        n++;
+      }
+      if (n > 0) logger.log(`已从遗留文件迁移 ${n} 个登录会话: ${p}`);
+    } catch (e) {
+      logger.error("迁移 .mi.json 失败", e);
+    }
+  }
+}
+
+export function saveSession(sid: string, s: PersistedSession) {
+  const cur = readState();
+  patchState({
+    sessions: {
+      ...(cur?.sessions || {}),
+      [sid]: { ...s, updatedAt: Date.now() },
+    },
+  });
+}
+
+/** 把上次登录的会话 cookie 灌进新的 cookie jar，让 serviceLogin 直接认出「已登录设备」 */
+function seedSessionCookies(jar: CookieJar, s?: PersistedSession) {
+  if (!s) return;
+  if (s.userId) jar.set("userId", s.userId);
+  if (s.deviceId) jar.set("deviceId", s.deviceId);
+  if (s.cUserId) jar.set("cUserId", s.cUserId);
+  if (s.passToken) jar.set("passToken", s.passToken);
+  const is = loadIdentitySession();
+  if (is) jar.set("identity_session", is);
 }
 
 /* ---------------- 工具 ---------------- */
@@ -649,8 +754,22 @@ export async function xiaomiAuthLogin(
       error?: string;
     }
 > {
-  const deviceId = creds.deviceId || randomDeviceId();
+  const saved = loadSession(creds.sid) || {};
+  const deviceId = creds.deviceId || saved.deviceId || randomDeviceId();
   const jar = new CookieJar();
+  seedSessionCookies(jar, saved);
+  // 无论本次是否要输验证码，都先把 deviceId 固定并落盘，
+  // 保证「登录 → 验证码 → 重走登录」全程是同一台设备。
+  saveSession(creds.sid, {
+    ...saved,
+    deviceId,
+    userId: saved.userId || creds.userId,
+  });
+  if (saved.passToken) {
+    logger.log(
+      `[${creds.sid}] 复用上次登录会话（deviceId=${deviceId}），尝试免验证码登录`
+    );
+  }
   try {
     // step1(+step2)：已带会话时直接拿 location，否则提交账号密码
     const s2 = await loginStep12(creds, deviceId, jar);
@@ -700,6 +819,16 @@ export async function xiaomiAuthLogin(
       return { ok: false, verifyRequired: false, error: st.error };
     }
     const account = makeAccount(creds, deviceId, s2, st.serviceToken, st.userId);
+    // 登录成功：把会话（含 passToken）落盘，下次启动即可免验证码
+    saveSession(creds.sid, {
+      deviceId,
+      userId: account.userId,
+      cUserId: s2.cUserId,
+      passToken: s2.passToken,
+      ssecurity: s2.ssecurity,
+      nonce: s2.nonce,
+      serviceToken: st.serviceToken,
+    });
     return { ok: true, account };
   } catch (e: any) {
     return { ok: false, verifyRequired: false, error: e?.message ?? String(e) };
@@ -714,8 +843,12 @@ export async function xiaomiAuthVerifyAndLogin(
   ticket: string,
   verifyUrl: string
 ): Promise<{ ok: true; account: any } | { ok: false; error?: string }> {
-  const deviceId = creds.deviceId || randomDeviceId();
+  // 必须复用触发本次验证的同一个 deviceId（xiaomiAuthLogin 已落盘），
+  // 否则验证成功后重走登录时又变成「陌生设备」，可能再次被要求验证。
+  const saved = loadSession(creds.sid) || {};
+  const deviceId = creds.deviceId || saved.deviceId || randomDeviceId();
   const jar = new CookieJar();
+  seedSessionCookies(jar, saved);
   try {
     const v = await verifyTicket(ticket, verifyUrl, jar, {
       sid: creds.sid,
@@ -750,6 +883,16 @@ export async function xiaomiAuthVerifyAndLogin(
       return { ok: false, error: st.error };
     }
     const account = makeAccount(creds, deviceId, s2, st.serviceToken, st.userId);
+    // 验证通过后同样落盘：这台设备从此被小米信任，后续登录无需再输验证码
+    saveSession(creds.sid, {
+      deviceId,
+      userId: account.userId,
+      cUserId: s2.cUserId,
+      passToken: s2.passToken,
+      ssecurity: s2.ssecurity,
+      nonce: s2.nonce,
+      serviceToken: st.serviceToken,
+    });
     return { ok: true, account };
   } catch (e: any) {
     return { ok: false, error: e?.message ?? String(e) };
