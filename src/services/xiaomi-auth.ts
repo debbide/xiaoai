@@ -376,6 +376,12 @@ export interface XiaomiCreds {
   password: string;
   sid: "xiaomiio" | "micoapi";
   deviceId?: string;
+  /**
+   * 用户手动提供的 passToken（从浏览器 account.xiaomi.com 的 cookie 里复制）。
+   * 带上它 serviceLogin 会直接返回 code=0 + ssecurity，**不触发验证码下发**，
+   * 从而绕开 70022 频控。等价于账号密码，注意保密。
+   */
+  passToken?: string;
 }
 
 function userAgent(deviceId: string): string {
@@ -779,24 +785,36 @@ export async function xiaomiAuthLogin(
 > {
   const saved = loadSession(creds.sid) || {};
   const deviceId = creds.deviceId || saved.deviceId || randomDeviceId();
-  const jar = new CookieJar();
-  seedSessionCookies(jar, saved);
-  // 无论本次是否要输验证码，都先把 deviceId 固定并落盘，
-  // 保证「登录 → 验证码 → 重走登录」全程是同一台设备。
-  saveSession(creds.sid, {
+  // 配置里手填的 passToken 优先（来自浏览器，一般比本地缓存的新）
+  const passToken = creds.passToken || saved.passToken;
+  const session: PersistedSession = {
     ...saved,
     deviceId,
     userId: saved.userId || creds.userId,
-  });
-  if (saved.passToken) {
+    passToken,
+  };
+  const jar = new CookieJar();
+  seedSessionCookies(jar, session);
+  // 无论本次是否要输验证码，都先把 deviceId 固定并落盘，
+  // 保证「登录 → 验证码 → 重走登录」全程是同一台设备。
+  saveSession(creds.sid, session);
+  if (passToken) {
     logger.log(
-      `[${creds.sid}] 复用上次登录会话（deviceId=${deviceId}），尝试免验证码登录`
+      `[${creds.sid}] 携带 passToken（${
+        creds.passToken ? "配置填写" : "本地缓存"
+      }）尝试免验证码登录，deviceId=${deviceId}`
     );
   }
   try {
     // step1(+step2)：已带会话时直接拿 location，否则提交账号密码
     const s2 = await loginStep12(creds, deviceId, jar);
     if (s2.notificationUrl) {
+      if (passToken) {
+        logger.error(
+          `[${creds.sid}] 已提供 passToken 却仍被要求验证 → 这个 passToken 很可能已失效/过期，` +
+            `请重新登录 account.xiaomi.com 复制一个新的`
+        );
+      }
       // 风控：走 identity/list 拿验证方式，然后显式下发验证码（step3b）
       const { options } = await checkIdentityList(s2.notificationUrl, jar, deviceId);
       // 优先手机短信(4)，其次邮箱(8)
@@ -863,7 +881,8 @@ export async function xiaomiAuthLogin(
       deviceId,
       userId: account.userId,
       cUserId: s2.cUserId,
-      passToken: s2.passToken,
+      // 响应里可能不带 passToken（沿用旧值时），别把它抹掉
+      passToken: s2.passToken || passToken,
       ssecurity: s2.ssecurity,
       nonce: s2.nonce,
       serviceToken: st.serviceToken,
@@ -888,8 +907,14 @@ export async function xiaomiAuthVerifyAndLogin(
   // 否则验证成功后重走登录时又变成「陌生设备」，可能再次被要求验证。
   const saved = loadSession(creds.sid) || {};
   const deviceId = creds.deviceId || saved.deviceId || randomDeviceId();
+  const passToken = creds.passToken || saved.passToken;
   const jar = new CookieJar();
-  seedSessionCookies(jar, saved);
+  seedSessionCookies(jar, {
+    ...saved,
+    deviceId,
+    userId: saved.userId || creds.userId,
+    passToken,
+  });
   try {
     const v = await verifyTicket(ticket, verifyUrl, jar, {
       sid: creds.sid,
@@ -929,7 +954,8 @@ export async function xiaomiAuthVerifyAndLogin(
       deviceId,
       userId: account.userId,
       cUserId: s2.cUserId,
-      passToken: s2.passToken,
+      // 响应里可能不带 passToken（沿用旧值时），别把它抹掉
+      passToken: s2.passToken || passToken,
       ssecurity: s2.ssecurity,
       nonce: s2.nonce,
       serviceToken: st.serviceToken,

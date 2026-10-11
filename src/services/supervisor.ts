@@ -30,6 +30,7 @@ speaker: {
 userId: cfg.xiaomi.userId,
 password: cfg.xiaomi.password,
 did: cfg.xiaomi.did || undefined,
+passToken: cfg.xiaomi.passToken || undefined,
 tts: cfg.speaker.tts,
 ttsCommand: cfg.speaker.ttsCommand,
 wakeUpCommand: cfg.speaker.wakeUpCommand,
@@ -46,6 +47,8 @@ export interface LoginAndStartResult {
 ok: boolean;
 stage: string;
 verifyUrls?: Record<string, string>;
+verifySid?: string;
+verifyOptions?: number[];
 error?: string;
 }
 
@@ -109,6 +112,7 @@ const login = await xiaomiLogin({
 userId: cfg.xiaomi.userId,
 password: cfg.xiaomi.password,
 did: cfg.xiaomi.did || undefined,
+passToken: cfg.xiaomi.passToken || undefined,
 });
 if (!login.ok) {
 Status.service = "stopped";

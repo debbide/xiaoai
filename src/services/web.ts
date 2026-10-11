@@ -163,6 +163,12 @@ ${msg ? `<div class="card"><b>${msg}</b></div>` : ""}
 <div class="card"><h2>小米账号</h2>
 ${f("xiaomi.userId", cfg.xiaomi.userId, "text", "纯数字小米 ID（account.xiaomi.com → 个人信息里看），不要填手机号")}
 ${f("xiaomi.password", cfg.xiaomi.password, "password")}
+${f(
+  "xiaomi.passToken",
+  cfg.xiaomi.passToken || "",
+  "password",
+  "可选，但强烈建议填：浏览器登录 account.xiaomi.com → F12 → Application → Cookies → 复制 passToken 的值。填了它就能跳过短信/邮箱验证码（绕开 70022 频控）。⚠️ 等价于账号密码，不要外泄"
+)}
 ${f("xiaomi.did", cfg.xiaomi.did, "text", "米家 App 里的音箱名称，必须一字不差；留空则自动取账号下设备")}
 </div>
 <div class="card"><h2>OpenAI 中转</h2>
@@ -204,6 +210,8 @@ async function handlePostConfig(body: string): Promise<ForkConfig> {
   cfg.xiaomi.userId = g("xiaomi.userId");
   cfg.xiaomi.password = g("xiaomi.password");
   cfg.xiaomi.did = g("xiaomi.did");
+  // 表单里是 password 类型，浏览器会回填原值；留空则视为清空
+  cfg.xiaomi.passToken = g("xiaomi.passToken");
   cfg.openai.model = g("openai.model") || "gpt-4o";
   cfg.openai.apiKey = g("openai.apiKey");
   cfg.openai.baseURL = g("openai.baseURL") || "https://api.openai.com/v1";
@@ -326,6 +334,7 @@ export async function startWeb(cfg: ForkConfig): Promise<http.Server> {
           userId: cfg.xiaomi.userId,
           password: cfg.xiaomi.password,
           did: cfg.xiaomi.did || undefined,
+          passToken: cfg.xiaomi.passToken || undefined,
         });
         sendJson(res, {
           ok: r.ok,
@@ -360,6 +369,7 @@ export async function startWeb(cfg: ForkConfig): Promise<http.Server> {
           userId: cfg.xiaomi.userId,
           password: cfg.xiaomi.password,
           did: cfg.xiaomi.did || undefined,
+          passToken: cfg.xiaomi.passToken || undefined,
         });
         // 验证码通过且全部 sid 登录完成 → 用已验证的会话直接启动服务（不再重复登录）
         if (r.ok && (r as any).miNA && (r as any).miIOT) {

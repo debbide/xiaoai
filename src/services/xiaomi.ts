@@ -113,6 +113,7 @@ export async function xiaomiLogin(config: {
   userId: string;
   password: string;
   did?: string;
+  passToken?: string;
 }): Promise<XiaomiLoginResult> {
   pending = null;
   Status.xiaomi = "logging-in";
@@ -127,6 +128,7 @@ export async function xiaomiLogin(config: {
       userId: config.userId,
       password: config.password,
       sid,
+      passToken: config.passToken || undefined,
     };
     logger.log(`小米登录 [${sid}] …`);
     const r = await xiaomiAuthLogin(creds);
@@ -202,7 +204,7 @@ export async function xiaomiLogin(config: {
  */
 export async function xiaomiSubmitVerifyCode(
   ticket: string,
-  config: { userId: string; password: string; did?: string }
+  config: { userId: string; password: string; did?: string; passToken?: string }
 ): Promise<XiaomiLoginResult> {
   const p = pending;
   if (!p) {
@@ -244,6 +246,7 @@ export async function xiaomiSubmitVerifyCode(
       userId: config.userId,
       password: config.password,
       sid,
+      passToken: config.passToken || undefined,
     };
     logger.log(`小米登录 [${sid}] …`);
     const r2 = await xiaomiAuthLogin(creds);

@@ -10,6 +10,14 @@ export interface ForkConfig {
     userId: string;
     password: string;
     did: string;
+    /**
+     * 可选。从浏览器 account.xiaomi.com 复制来的 passToken cookie 值。
+     *
+     * 作用：带上它请求 serviceLogin 时，小米直接返回 code=0 + ssecurity，
+     * 跳过 serviceLoginAuth2，也就**不会下发验证码**（绕开 70022 频控）。
+     * 等价于账号密码，务必保密（见 mi-gpt-next issue #4）。
+     */
+    passToken?: string;
   };
   openai: {
     model: string;
@@ -33,7 +41,7 @@ export interface ForkConfig {
 
 export function defaultConfig(): ForkConfig {
   return {
-    xiaomi: { userId: "", password: "", did: "" },
+    xiaomi: { userId: "", password: "", did: "", passToken: "" },
     openai: {
       model: "gpt-4o",
       apiKey: "",
