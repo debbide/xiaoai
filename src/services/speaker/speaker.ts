@@ -26,6 +26,17 @@ export interface SpeakerCommand {
    * 命中后执行的操作，返回值非空时会自动回复给用户
    */
   run: (msg: QueryMessage) => Promise<SpeakerAnswer | undefined | void>;
+  /**
+   * 命中该指令时，若小爱正在播放音乐/媒体，是否也把它暂停掉。
+   *
+   * - 未设置 / true（默认）：无条件暂停。用于唤醒、退出、换音色等
+   *   MiGPT 自己的指令 —— 目的是打断小爱正在播报的 TTS，避免两个声音重叠。
+   * - false：检测到正在播放音乐时跳过暂停，避免一句闲聊就把歌掐断。
+   *   小爱自己的 TTS 播报不受影响，仍会被打断。
+   *
+   * 与 songloft / xiaomusic 等外部音乐服务共存时，建议给「聊天」指令设为 false。
+   */
+  pauseOnMusic?: boolean;
 }
 
 export type SpeakerConfig = BaseSpeakerConfig & {
@@ -131,8 +142,8 @@ export class Speaker extends BaseSpeaker {
     const { noNewMsg } = this.checkIfHasNewMsg(msg);
     for (const command of this.commands) {
       if (command.match(msg)) {
-        // 关闭小爱的回复
-        await this.MiNA!.pause();
+        // 关闭小爱的回复（放歌共存场景下不打断音乐）
+        await this.pauseXiaoai(command);
         // 执行命令
         const answer = await command.run(msg);
         // 回复用户
@@ -147,6 +158,39 @@ export class Speaker extends BaseSpeaker {
         await this.exitKeepAliveIfNeeded();
         return;
       }
+    }
+  }
+
+  /**
+   * 命中指令后暂停小爱当前播放。
+   *
+   * 默认无条件暂停（打断小爱的 TTS 回复，避免两个声音重叠）。
+   * 指令声明 `pauseOnMusic: false` 时，只在「当前没在播放音乐」时才暂停，
+   * 这样小爱/外部音乐插件正在放歌时，一句闲聊不会把歌掐断。
+   */
+  private async pauseXiaoai(command: SpeakerCommand) {
+    if (command.pauseOnMusic === false && (await this.isPlayingMusic())) {
+      if (this.debug) {
+        this.logger.debug("正在播放音乐，跳过 pause");
+      }
+      return;
+    }
+    await this.MiNA!.pause();
+  }
+
+  /**
+   * 当前是否正在播放音乐/媒体（区别于小爱自己的 TTS 播报）。
+   *
+   * 判据与 BaseSpeaker 里「小爱自己开始播放音乐」的判定保持一致：
+   * `status === "playing"` 且 `media_type` 非空 —— 小爱念 TTS 时 media_type 为空。
+   * 设备不支持查询播放状态时返回 false，即退化为「照旧暂停」。
+   */
+  private async isPlayingMusic(): Promise<boolean> {
+    try {
+      const status = await this.MiNA?.getStatus();
+      return !!status && status.status === "playing" && !!status.media_type;
+    } catch {
+      return false;
     }
   }
 

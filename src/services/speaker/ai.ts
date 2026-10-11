@@ -205,6 +205,8 @@ export class AISpeaker extends Speaker {
         match: (msg) =>
           this.keepAlive ||
           this.callAIKeywords.some((e) => msg.text.startsWith(e)),
+        // 聊天指令不打断正在播放的音乐（小爱自己的 TTS 播报仍会被打断）
+        pauseOnMusic: false,
         run: (msg) => this.askAIForAnswer(msg),
       },
     ] as SpeakerCommand[];
